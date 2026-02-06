@@ -1,31 +1,44 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows.Threading;
 using SpaceLens.Core;
+using System.Linq;
+using System.IO;
 
 namespace SpaceLens.App;
 
 public sealed class MainViewModel : INotifyPropertyChanged
 {
-    private readonly IFakeScanService _fakeScanService;
+    private readonly IScanService _scanService;
+    private readonly ConcurrentQueue<ScanItem> _pendingUiItems = new();
+    private readonly DispatcherTimer _uiBatchTimer;
     private bool _isScanning;
     private int _scanProgress;
     private string _statusText = "Ready";
     private string _selectedDrive = "C:";
     private string _selectedFolder = @"C:\Users\Demo";
+    private long _latestBytes;
 
-    public MainViewModel() : this(new FakeScanService())
+    public MainViewModel() : this(new FileSystemScanService())
     {
     }
 
-    internal MainViewModel(IFakeScanService fakeScanService)
+    internal MainViewModel(IScanService scanService)
     {
-        _fakeScanService = fakeScanService;
-        ScanCommand = new RelayCommand(async _ => await RunFakeScanAsync(), _ => !IsScanning);
+        _scanService = scanService;
+        ScanCommand = new RelayCommand(async _ => await RunScanAsync(), _ => !IsScanning);
 
-        SnapshotPlaceholders.Add("Snapshot (placeholder)");
-        TreePlaceholders.Add("Tree view placeholder");
-        TopFilesPlaceholders.Add("Top files placeholder");
+        _uiBatchTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(200)
+        };
+        _uiBatchTimer.Tick += (_, _) => ConsumePendingUiItems();
+
+        SnapshotPlaceholders.Add("No snapshots yet.");
+        TreePlaceholders.Add("No scan data yet.");
+        TopFilesPlaceholders.Add("No scan data yet.");
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -92,28 +105,118 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private async Task RunFakeScanAsync()
+    private async Task RunScanAsync()
     {
         IsScanning = true;
-        StatusText = "Running fake scan...";
+        StatusText = "Scanning filesystem...";
         ScanProgress = 0;
+        _latestBytes = 0;
 
-        var progress = new Progress<int>(value =>
+        _pendingUiItems.Clear();
+        TreePlaceholders.Clear();
+        TopFilesPlaceholders.Clear();
+
+        _uiBatchTimer.Start();
+
+        var root = ResolveRoot();
+        var progress = new Progress<ScanProgress>(p =>
         {
-            ScanProgress = value;
-            StatusText = $"Fake scan progress: {value}%";
+            _latestBytes = p.BytesDiscovered;
+            if (p.ItemDiscovered is not null)
+            {
+                _pendingUiItems.Enqueue(p.ItemDiscovered);
+            }
+
+            StatusText = $"Scanning {p.CurrentPath} | files: {p.FilesProcessed}, folders: {p.FoldersProcessed}, errors: {p.ErrorsCount}";
+            ScanProgress = p.QueueDepth == 0 ? 100 : 50;
         });
 
-        var result = await _fakeScanService.RunAsync(progress, CancellationToken.None);
-        SnapshotPlaceholders.Insert(0, $"Snapshot {DateTime.Now:HH:mm:ss} ({FormatSize(result.TotalBytes)})");
-        StatusText = $"Fake scan complete: {result.Items.Count} mock items";
+        var snapshot = await _scanService.ScanAsync(root, progress, CancellationToken.None);
+
+        ConsumePendingUiItems();
+        _uiBatchTimer.Stop();
+
+        var summary = $"Snapshot {DateTime.Now:HH:mm:ss} ({FormatSize(snapshot.TotalBytes)})";
+        if (SnapshotPlaceholders.Count == 1 && SnapshotPlaceholders[0] == "No snapshots yet.")
+        {
+            SnapshotPlaceholders.Clear();
+        }
+
+        SnapshotPlaceholders.Insert(0, summary);
+        StatusText = $"Scan complete: {snapshot.Items.Count} items, {snapshot.Errors.Count} errors";
+        ScanProgress = 100;
         IsScanning = false;
+    }
+
+    private ScanRoot ResolveRoot()
+    {
+        if (!string.IsNullOrWhiteSpace(SelectedFolder) && Directory.Exists(SelectedFolder))
+        {
+            return ScanRoot.ForFolder(SelectedFolder);
+        }
+
+        var drivePath = SelectedDrive.EndsWith(":", StringComparison.Ordinal) ? $"{SelectedDrive}{Path.DirectorySeparatorChar}" : SelectedDrive;
+        return ScanRoot.ForDrive(drivePath);
+    }
+
+    private void ConsumePendingUiItems()
+    {
+        var batch = new List<ScanItem>(capacity: 400);
+        while (batch.Count < 400 && _pendingUiItems.TryDequeue(out var item))
+        {
+            batch.Add(item);
+        }
+
+        if (batch.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var directory in batch.Where(i => i.IsDirectory).Take(100))
+        {
+            TreePlaceholders.Add($"{directory.Path} [{FormatSize(directory.SizeBytes)}]");
+        }
+
+        var topFiles = batch
+            .Where(i => !i.IsDirectory)
+            .OrderByDescending(i => i.SizeBytes)
+            .Take(20)
+            .Select(i => $"{Path.GetFileName(i.Path)} - {FormatSize(i.SizeBytes)}")
+            .ToList();
+
+        if (topFiles.Count > 0)
+        {
+            if (TopFilesPlaceholders.Count == 1 && TopFilesPlaceholders[0] == "No scan data yet.")
+            {
+                TopFilesPlaceholders.Clear();
+            }
+
+            foreach (var topFile in topFiles)
+            {
+                TopFilesPlaceholders.Add(topFile);
+            }
+
+            while (TopFilesPlaceholders.Count > 40)
+            {
+                TopFilesPlaceholders.RemoveAt(TopFilesPlaceholders.Count - 1);
+            }
+        }
+
+        if (TreePlaceholders.Count > 200)
+        {
+            while (TreePlaceholders.Count > 200)
+            {
+                TreePlaceholders.RemoveAt(0);
+            }
+        }
+
+        StatusText = $"Discovered {FormatSize(_latestBytes)} so far";
     }
 
     private static string FormatSize(long bytes)
     {
         var gb = bytes / 1024d / 1024d / 1024d;
-        return $"{gb:F1} GB";
+        return gb >= 1 ? $"{gb:F1} GB" : $"{bytes / 1024d / 1024d:F1} MB";
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
