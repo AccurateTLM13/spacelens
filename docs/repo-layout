@@ -1,0 +1,33 @@
+spacelens/
+  docs/
+    PRD.md
+    ARCHITECTURE.md
+    DEFINITION_OF_DONE.md
+    RULES.md
+  src/
+    SpaceLens.App/                 (WPF app)
+      SpaceLens.App.csproj
+      App.xaml
+      MainWindow.xaml
+      MainWindow.xaml.cs
+      Views/
+      ViewModels/
+      Services/
+      Models/
+      Controls/
+      Resources/
+    SpaceLens.Core/                (business logic)
+      SpaceLens.Core.csproj
+      Scanning/
+      Rules/
+      Snapshotting/
+      Compare/
+    SpaceLens.Data/                (local persistence)
+      SpaceLens.Data.csproj
+      Db/
+      Repos/
+      Migrations/
+  tests/
+    SpaceLens.Core.Tests/
+  SpaceLens.sln
+  README.md
