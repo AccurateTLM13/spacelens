@@ -14,5 +14,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SpaceLens.Core\SpaceLens.Core.csproj" />
+    <ProjectReference Include="..\..\src\SpaceLens.Data\SpaceLens.Data.csproj" />
   </ItemGroup>
 </Project>

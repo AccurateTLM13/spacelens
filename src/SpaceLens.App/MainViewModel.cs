@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using SpaceLens.Core;
+using SpaceLens.Data;
 using System.Linq;
 using System.IO;
 
@@ -12,6 +13,7 @@ namespace SpaceLens.App;
 public sealed class MainViewModel : INotifyPropertyChanged
 {
     private readonly IScanService _scanService;
+    private readonly SnapshotStore _snapshotStore;
     private readonly ConcurrentQueue<ScanItem> _pendingUiItems = new();
     private readonly DispatcherTimer _uiBatchTimer;
     private bool _isScanning;
@@ -20,14 +22,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _selectedDrive = "C:";
     private string _selectedFolder = @"C:\Users\Demo";
     private long _latestBytes;
+    private SnapshotListItem? _selectedSnapshot;
 
-    public MainViewModel() : this(new FileSystemScanService())
+    public MainViewModel() : this(new FileSystemScanService(), SnapshotStore.CreateDefault())
     {
     }
 
-    internal MainViewModel(IScanService scanService)
+    internal MainViewModel(IScanService scanService, SnapshotStore snapshotStore)
     {
         _scanService = scanService;
+        _snapshotStore = snapshotStore;
         ScanCommand = new RelayCommand(async _ => await RunScanAsync(), _ => !IsScanning);
 
         _uiBatchTimer = new DispatcherTimer
@@ -36,14 +40,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         };
         _uiBatchTimer.Tick += (_, _) => ConsumePendingUiItems();
 
-        SnapshotPlaceholders.Add("No snapshots yet.");
+        SnapshotPlaceholders.Add(new SnapshotListItem(0, "No snapshots yet."));
         TreePlaceholders.Add("No scan data yet.");
         TopFilesPlaceholders.Add("No scan data yet.");
+
+        LoadExistingSnapshots();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ObservableCollection<string> SnapshotPlaceholders { get; } = new();
+    public ObservableCollection<SnapshotListItem> SnapshotPlaceholders { get; } = new();
     public ObservableCollection<string> TreePlaceholders { get; } = new();
     public ObservableCollection<string> TopFilesPlaceholders { get; } = new();
 
@@ -105,6 +111,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public SnapshotListItem? SelectedSnapshot
+    {
+        get => _selectedSnapshot;
+        set
+        {
+            if (_selectedSnapshot == value) return;
+            _selectedSnapshot = value;
+            OnPropertyChanged();
+
+            if (value is null || value.Id <= 0 || IsScanning)
+            {
+                return;
+            }
+
+            LoadSnapshot(value.Id);
+        }
+    }
+
     private async Task RunScanAsync()
     {
         IsScanning = true;
@@ -133,19 +157,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         var snapshot = await _scanService.ScanAsync(root, progress, CancellationToken.None);
 
+        var snapshotId = _snapshotStore.SaveSnapshot(snapshot);
+
         ConsumePendingUiItems();
         _uiBatchTimer.Stop();
 
-        var summary = $"Snapshot {DateTime.Now:HH:mm:ss} ({FormatSize(snapshot.TotalBytes)})";
-        if (SnapshotPlaceholders.Count == 1 && SnapshotPlaceholders[0] == "No snapshots yet.")
+        var summary = $"{snapshot.CompletedUtc:yyyy-MM-dd HH:mm:ss} | {snapshot.Root.Path} | {FormatSize(snapshot.TotalBytes)}";
+        if (SnapshotPlaceholders.Count == 1 && SnapshotPlaceholders[0].Id == 0)
         {
             SnapshotPlaceholders.Clear();
         }
 
-        SnapshotPlaceholders.Insert(0, summary);
+        SnapshotPlaceholders.Insert(0, new SnapshotListItem(snapshotId, summary));
         StatusText = $"Scan complete: {snapshot.Items.Count} items, {snapshot.Errors.Count} errors";
         ScanProgress = 100;
         IsScanning = false;
+        SelectedSnapshot = SnapshotPlaceholders[0];
     }
 
     private ScanRoot ResolveRoot()
@@ -236,6 +263,60 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         var gb = bytes / 1024d / 1024d / 1024d;
         return gb >= 1 ? $"{gb:F1} GB" : $"{bytes / 1024d / 1024d:F1} MB";
+    }
+
+    private void LoadExistingSnapshots()
+    {
+        var snapshots = _snapshotStore.GetSnapshots();
+        if (snapshots.Count == 0)
+        {
+            return;
+        }
+
+        SnapshotPlaceholders.Clear();
+        foreach (var snapshot in snapshots)
+        {
+            SnapshotPlaceholders.Add(new SnapshotListItem(
+                snapshot.Id,
+                $"{snapshot.TimestampUtc:yyyy-MM-dd HH:mm:ss} | {snapshot.RootPath} | {FormatSize(snapshot.TotalBytes)}"));
+        }
+
+        SelectedSnapshot = SnapshotPlaceholders[0];
+    }
+
+    private void LoadSnapshot(long snapshotId)
+    {
+        var snapshot = _snapshotStore.GetSnapshot(snapshotId);
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        TreePlaceholders.Clear();
+        TopFilesPlaceholders.Clear();
+
+        foreach (var directory in snapshot.Items.Where(i => i.IsDirectory).Take(200))
+        {
+            TreePlaceholders.Add($"{directory.Path} [{FormatSize(directory.SizeBytes)}]");
+        }
+
+        foreach (var file in snapshot.Items.Where(i => !i.IsDirectory).OrderByDescending(i => i.SizeBytes).Take(40))
+        {
+            TopFilesPlaceholders.Add($"{Path.GetFileName(file.Path)} - {FormatSize(file.SizeBytes)}");
+        }
+
+        if (TreePlaceholders.Count == 0)
+        {
+            TreePlaceholders.Add("No scan data yet.");
+        }
+
+        if (TopFilesPlaceholders.Count == 0)
+        {
+            TopFilesPlaceholders.Add("No scan data yet.");
+        }
+
+        StatusText = $"Loaded snapshot from {snapshot.CompletedUtc:yyyy-MM-dd HH:mm:ss} ({snapshot.Items.Count} items)";
+        ScanProgress = 100;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
