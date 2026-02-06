@@ -174,7 +174,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         foreach (var directory in batch.Where(i => i.IsDirectory).Take(100))
         {
-            TreePlaceholders.Add($"{directory.Path} [{FormatSize(directory.SizeBytes)}]");
+            TreePlaceholders.Add(FormatDirectoryPresentation(directory));
         }
 
         var topFiles = batch
@@ -211,6 +211,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         StatusText = $"Discovered {FormatSize(_latestBytes)} so far";
+    }
+
+    private static string FormatDirectoryPresentation(ScanItem directory)
+    {
+        var baseLabel = $"{directory.Path} [{FormatSize(directory.SizeBytes)}]";
+        return IsSystemDirectoryPath(directory.Path)
+            ? $"{baseLabel} — System directory (collapsed by default)"
+            : baseLabel;
+    }
+
+    private static bool IsSystemDirectoryPath(string path)
+    {
+        var normalized = path.Replace('/', '\\').TrimEnd('\\');
+        var leaf = Path.GetFileName(normalized);
+
+        return leaf.Equals("Windows", StringComparison.OrdinalIgnoreCase)
+               || leaf.Equals("Program Files", StringComparison.OrdinalIgnoreCase)
+               || leaf.Equals("Program Files (x86)", StringComparison.OrdinalIgnoreCase)
+               || leaf.Equals("ProgramData", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FormatSize(long bytes)
